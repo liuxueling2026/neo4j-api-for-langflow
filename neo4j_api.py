@@ -6,8 +6,6 @@ from typing import Optional, Dict, Any
 app = FastAPI(title="Neo4j 图数据库全功能接口", version="1.0")
 
 # ===================== Neo4j 数据库配置 =====================
-# 连接永久免费版 AuraDB，固定 database = "neo4j"
-# ==========================================================
 config = {
     "uri": "neo4j+s://509c6b62.databases.neo4j.io",
     "user": "509c6b62",
@@ -15,51 +13,56 @@ config = {
     "database": "509c6b62"
 }
 
-# 创建数据库驱动（全局复用，AuraDB 必须使用 basic_auth）
 driver = GraphDatabase.driver(
     config["uri"],
     auth=basic_auth(config["user"], config["password"])
 )
 
 # ===================== 请求模型 =====================
-# 定义接口接收的数据格式（Pydantic 模型）
-# ==========================================================
-
-# 通用查询：可执行任意 Cypher 语句
 class CypherRequest(BaseModel):
     cypher: str
     params: Optional[Dict[str, Any]] = {}
 
-# 新增节点：指定标签 + 属性
 class CreateNodeRequest(BaseModel):
     label: str
     properties: Dict[str, Any]
 
-# 更新节点：匹配条件 + 更新内容
 class UpdateNodeRequest(BaseModel):
     label: str
     match_properties: Dict[str, Any]
     set_properties: Dict[str, Any]
 
-# 删除节点：根据标签 + 属性匹配删除
 class DeleteNodeRequest(BaseModel):
     label: str
     match_properties: Dict[str, Any]
 
-# ===================== 1. 通用查询接口 =====================
-# 功能：执行任意 Cypher 查询，支持参数化，安全无注入
-@app.post("/query", summary="执行任意Cypher查询")
+# ===================== 支持多条语句 /query =====================
+@app.post("/query", summary="执行任意Cypher查询（支持多条语句）")
 def run_cypher(req: CypherRequest):
     try:
+        # 关键：用 session 手动拆分语句执行
         with driver.session(database=config["database"]) as session:
-            result = session.run(req.cypher, **req.params)
-            records = [dict(record) for record in result]
-            return {"success": True, "count": len(records), "data": records}
+            # 按分号拆分
+            statements = req.cypher.split(';')
+            all_records = []
+            
+            for stmt in statements:
+                stmt = stmt.strip()
+                if not stmt:
+                    continue
+                try:
+                    result = session.run(stmt, **req.params)
+                    records = [dict(record) for record in result]
+                    all_records.extend(records)
+                except Exception as e:
+                    pass
+
+        return {"success": True, "count": len(all_records), "data": all_records}
+    
     except Exception as e:
         return {"success": False, "error": str(e)}
 
 # ===================== 2. 新增节点接口 =====================
-# 功能：创建任意类型节点，自动绑定标签与属性
 @app.post("/create/node", summary="新增节点")
 def create_node(req: CreateNodeRequest):
     cypher = f"CREATE (n:{req.label} $props) RETURN n"
@@ -71,10 +74,8 @@ def create_node(req: CreateNodeRequest):
         return {"success": False, "error": str(e)}
 
 # ===================== 3. 更新节点接口 =====================
-# 功能：根据条件匹配节点，并更新节点属性
 @app.post("/update/node", summary="更新节点")
 def update_node(req: UpdateNodeRequest):
-    # 拼接合法条件
     match_conditions = ", ".join([f"{key}: ${key}" for key in req.match_properties.keys()])
     cypher = f"""
         MATCH (n:{req.label} {{{match_conditions}}})
@@ -92,24 +93,18 @@ def update_node(req: UpdateNodeRequest):
         return {"success": False, "error": str(e)}
 
 # ===================== 4. 删除节点接口 =====================
-# 功能：根据条件匹配节点，并删除
 @app.post("/delete/node", summary="删除节点（自动清理关系）")
 def delete_node(req: DeleteNodeRequest):
-    # 拼接合法条件：解决 MATCH 不能用 $map 的问题
     match_conditions = ", ".join([f"{key}: ${key}" for key in req.match_properties.keys()])
-    
-    # ✅ 关键：使用 DETACH DELETE（自动删关系 + 删节点）
     cypher = f"""
         MATCH (n:{req.label} {{{match_conditions}}})
         DETACH DELETE n
         RETURN count(n) AS deleted_count
     """
-    
     try:
         with driver.session(database=config["database"]) as session:
             result = session.run(cypher, **req.match_properties)
             deleted_count = result.single()["deleted_count"]
-            
             return {
                 "success": True,
                 "deleted_count": deleted_count,
@@ -118,8 +113,7 @@ def delete_node(req: DeleteNodeRequest):
     except Exception as e:
         return {"success": False, "error": str(e)}
 
-# ===================== 5. 快捷查询：查询某类全部数据 =====================
-# 功能：根据标签查询所有节点，支持限制返回数量
+# ===================== 5. 快捷查询 =====================
 @app.get("/list/{label}", summary="查询某类所有节点")
 def list_nodes(label: str, limit: int = 50):
     cypher = f"MATCH (n:{label}) RETURN n LIMIT $limit"
@@ -131,12 +125,10 @@ def list_nodes(label: str, limit: int = 50):
         return {"success": False, "error": str(e)}
 
 # ===================== 关闭数据库连接 =====================
-# 服务停止时自动关闭驱动，避免连接泄漏
 @app.on_event("shutdown")
 def close_driver():
     driver.close()
 
-# 本地运行
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
