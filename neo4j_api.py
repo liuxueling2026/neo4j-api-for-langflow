@@ -7,10 +7,10 @@ app = FastAPI(title="Neo4j 图数据库全功能接口", version="1.0")
 
 # ===================== Neo4j 数据库配置 =====================
 config = {
-    "uri": "neo4j+s://509c6b62.databases.neo4j.io",
-    "user": "509c6b62",
-    "password": "CXUsTXOAgZc_dzWW40qnXY56mLerkZLPEHSD9uqNWQ0",
-    "database": "509c6b62"
+    "uri": "neo4j+s://4221baaa.databases.neo4j.io",
+    "user": "4221baaa",
+    "password": "jkhsfQsFqdhjZsn3ybfyfcMkWkH5j_0XWh2DistajE0",
+    "database": "4221baaa"
 }
 
 driver = GraphDatabase.driver(
