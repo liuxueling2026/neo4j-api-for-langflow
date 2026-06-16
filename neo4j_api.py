@@ -72,7 +72,7 @@ class DeleteNodeRequest(BaseModel):
     label: str
     match_properties: Dict[str, Any]
 
-# ===================== 接口1：字段检索接口【修改兼容MCP】 =====================
+# ===================== 接口1：字段检索接口【修改兼容MCP + 修复Cypher语法】 =====================
 @app.post("/field/mapping/search", summary="检索字段映射、等价对象、冲突关系")
 async def search_field_mapping(raw_req: Request):
     # 1. 读取原始完整请求报文
@@ -89,43 +89,49 @@ async def search_field_mapping(raw_req: Request):
     req = FieldMappingRequest(**input_data)
 
     search_cypher = """
-    CALL {
-      OPTIONAL MATCH (s:Object {system: $system, name: $object})-[:SEMANTIC_EQUIVALENT]->(t:Object {system: 'LSC'})
-      RETURN collect(DISTINCT { system: t.system, object: t.name }) AS candidates
-    }
-    CALL {
-      OPTIONAL MATCH (src:Field {system: $system, object: $object, name: $fieldname})
-      OPTIONAL MATCH (src)-[m:MAPS_TO]->(mapped:Field)
-      OPTIONAL MATCH (src)-[c:CONFLICTS_WITH]->(conflict:Field)
-      RETURN
-        src.name AS sourceField,
-        src.object AS sourceObject,
-        src.system AS sourceSystem,
-        src.displayName AS sourceFieldLabel,
-        src.type AS sourceFieldType,
-        collect(DISTINCT CASE WHEN mapped IS NOT NULL THEN {
-          target: mapped.system + '.' + mapped.object + '.' + mapped.name,
-          targetSystem: mapped.system,
-          targetObject: mapped.object,
-          targetField: mapped.name,
-          confidence: m.confidence,
-          mappingType: m.mappingType,
-          source: m.source,
-          validatedBy: m.validatedBy,
-          isPrimary: m.isPrimary,
-          updatedAt: toString(m.updatedAt)
-        } END)[* WHERE item IS NOT NULL] AS existingMappings,
-        collect(DISTINCT CASE WHEN conflict IS NOT NULL THEN {
-          target: conflict.system + '.' + conflict.object + '.' + conflict.name,
-          conflictType: c.conflictType,
-          severity: c.severity,
-          description: c.conflictDescription,
-          resolutionStatus: c.resolutionStatus
-        } END)[* WHERE item IS NOT NULL] AS conflicts
-    }
-    RETURN candidates, sourceField, sourceObject, sourceSystem, existingMappings, conflicts,
-      coalesce(sourceFieldLabel, $fieldname) + '. ' + $fielddescription AS searchQuery,
-      sourceFieldLabel, sourceFieldType
+CALL {
+  OPTIONAL MATCH (s:Object {system: $system, name: $object})-[:SEMANTIC_EQUIVALENT]->(t:Object {system: 'LSC'})
+  RETURN collect(DISTINCT { system: t.system, object: t.name }) AS candidates
+}
+CALL {
+  OPTIONAL MATCH (src:Field {system: $system, object: $object, name: $fieldname})
+  OPTIONAL MATCH (src)-[m:MAPS_TO]->(mapped:Field)
+  OPTIONAL MATCH (src)-[c:CONFLICTS_WITH]->(conflict:Field)
+  RETURN
+    src.name AS sourceField,
+    src.object AS sourceObject,
+    src.system AS sourceSystem,
+    src.displayName AS sourceFieldLabel,
+    src.type AS sourceFieldType,
+    filter(
+      item IN collect(DISTINCT CASE WHEN m IS NOT NULL THEN {
+        target: m.system + '.' + m.object + '.' + m.name,
+        targetSystem: m.system,
+        targetObject: m.object,
+        targetField: m.name,
+        confidence: m.confidence,
+        mappingType: m.mappingType,
+        source: m.source,
+        validatedBy: m.validatedBy,
+        isPrimary: m.isPrimary,
+        updatedAt: toString(m.updatedAt)
+      } END)
+      WHERE item IS NOT NULL
+    ) AS existingMappings,
+    filter(
+      item IN collect(DISTINCT CASE WHEN c IS NOT NULL THEN {
+        target: c.system + '.' + c.object + '.' + c.name,
+        conflictType: c.conflictType,
+        severity: c.severity,
+        description: c.conflictDescription,
+        resolutionStatus: c.resolutionStatus
+      } END)
+      WHERE item IS NOT NULL
+    ) AS conflicts
+}
+RETURN candidates, sourceField, sourceObject, sourceSystem, existingMappings, conflicts,
+  coalesce(sourceFieldLabel, $fieldname) + '. ' + $fielddescription AS searchQuery,
+  sourceFieldLabel, sourceFieldType
     """
     cypher_params = {
         "system": req.system,
@@ -137,12 +143,6 @@ async def search_field_mapping(raw_req: Request):
         with driver.session(database=config["database"]) as session:
             result = session.run(search_cypher, **cypher_params)
             records = [dict(record) for record in result]
-        # 如果你需要适配MCP Output Schema（result+result_text），替换下面return
-        # import json
-        # return {
-        #     "result": records,
-        #     "result_text": json.dumps(records, ensure_ascii=False)
-        # }
         return {"success": True, "count": len(records), "data": records}
     except Exception as e:
         return {"success": False, "error": str(e)}
