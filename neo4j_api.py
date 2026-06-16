@@ -1,4 +1,4 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Request  # 新增Request导入
 from neo4j import GraphDatabase, basic_auth
 from pydantic import BaseModel
 from typing import Optional, Dict, Any, Union
@@ -72,9 +72,22 @@ class DeleteNodeRequest(BaseModel):
     label: str
     match_properties: Dict[str, Any]
 
-# ===================== 接口1：字段检索接口（原有） =====================
+# ===================== 接口1：字段检索接口【修改兼容MCP】 =====================
 @app.post("/field/mapping/search", summary="检索字段映射、等价对象、冲突关系")
-def search_field_mapping(req: FieldMappingRequest):
+async def search_field_mapping(raw_req: Request):
+    # 1. 读取原始完整请求报文
+    full_body = await raw_req.json()
+
+    # 2. 兼容MCP Client自动嵌套的外层 params
+    if "params" in full_body and isinstance(full_body["params"], dict):
+        input_data = full_body["params"]
+    else:
+        # Swagger/普通REST调用，直接取顶层JSON
+        input_data = full_body
+
+    # 3. 用模型校验参数
+    req = FieldMappingRequest(**input_data)
+
     search_cypher = """
     CALL {
       OPTIONAL MATCH (s:Object {system: $system, name: $object})-[:SEMANTIC_EQUIVALENT]->(t:Object {system: 'LSC'})
@@ -101,14 +114,14 @@ def search_field_mapping(req: FieldMappingRequest):
           validatedBy: m.validatedBy,
           isPrimary: m.isPrimary,
           updatedAt: toString(m.updatedAt)
-        } END) AS existingMappings,
+        } END)[* WHERE item IS NOT NULL] AS existingMappings,
         collect(DISTINCT CASE WHEN conflict IS NOT NULL THEN {
           target: conflict.system + '.' + conflict.object + '.' + conflict.name,
           conflictType: c.conflictType,
           severity: c.severity,
           description: c.conflictDescription,
           resolutionStatus: c.resolutionStatus
-        } END) AS conflicts
+        } END)[* WHERE item IS NOT NULL] AS conflicts
     }
     RETURN candidates, sourceField, sourceObject, sourceSystem, existingMappings, conflicts,
       coalesce(sourceFieldLabel, $fieldname) + '. ' + $fielddescription AS searchQuery,
@@ -124,14 +137,28 @@ def search_field_mapping(req: FieldMappingRequest):
         with driver.session(database=config["database"]) as session:
             result = session.run(search_cypher, **cypher_params)
             records = [dict(record) for record in result]
+        # 如果你需要适配MCP Output Schema（result+result_text），替换下面return
+        # import json
+        # return {
+        #     "result": records,
+        #     "result_text": json.dumps(records, ensure_ascii=False)
+        # }
         return {"success": True, "count": len(records), "data": records}
     except Exception as e:
         return {"success": False, "error": str(e)}
 
-# ===================== 接口2：新增【映射/冲突关系写入接口】重点新增 =====================
+# ===================== 接口2：新增【映射/冲突关系写入接口】兼容MCP =====================
 @app.post("/field/mapping/relation-upsert", summary="写入MAPS_TO/CONFLICTS_WITH关系")
-def upsert_field_relation(req: FieldRelationRequest):
-    # 完整传入你提供的关系写入Cypher
+async def upsert_field_relation(raw_req: Request):
+    # 读取原始请求体，兼容MCP外层params包裹
+    full_body = await raw_req.json()
+    if "params" in full_body and isinstance(full_body["params"], dict):
+        input_data = full_body["params"]
+    else:
+        input_data = full_body
+    # 校验模型
+    req = FieldRelationRequest(**input_data)
+
     relation_cypher = """
 WITH $action AS action, $confidence AS conf,
      $srcSystem AS srcSys, $srcObject AS srcObj, $srcField AS srcFld,
